@@ -55,18 +55,27 @@ async function initBrowser() {
     page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
+    // Set extra headers
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    });
+    
     // Set viewport
     await page.setViewport({ width: 1280, height: 800 });
     
-    // Go to BMS homepage to get cookies
-    console.log('🔗 Navigating to BookMyShow...');
+    // Go to BMS homepage first
+    console.log('🔗 Navigating to BookMyShow homepage...');
     await page.goto('https://in.bookmyshow.com', { waitUntil: 'networkidle2', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 3000));
     
-    // Wait a bit for any dynamic content
-    await new Promise(r => setTimeout(r, 2000));
+    // Navigate to a sports event page to get proper session
+    console.log('🔗 Navigating to sports section...');
+    await page.goto('https://in.bookmyshow.com/explore/sports-bengaluru', { waitUntil: 'networkidle2', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 3000));
     
     browserReady = true;
-    console.log('✅ Browser ready!');
+    console.log('✅ Browser ready with session!');
   } catch (error) {
     console.error('❌ Browser init failed:', error.message);
     browserReady = false;
@@ -172,23 +181,45 @@ async function checkEvent(code) {
   }
   
   try {
+    // Get cookies from browser and extract region info
+    const cookies = await page.cookies();
+    const rgnCookie = cookies.find(c => c.name === 'rgn');
+    let regionCode = 'BANG';
+    let regionSlug = 'bengaluru';
+    
+    if (rgnCookie) {
+      try {
+        const rgn = JSON.parse(decodeURIComponent(rgnCookie.value));
+        regionCode = rgn.regionCode || 'BANG';
+        regionSlug = rgn.regionSlug || 'bengaluru';
+      } catch (e) {}
+    }
+    
     // Use page.evaluate to make API call with browser cookies
-    const data = await page.evaluate(async (eventCode, apiUrl) => {
+    const data = await page.evaluate(async (eventCode, apiUrl, regCode) => {
       try {
         const response = await fetch(`${apiUrl}/api/le/events/info/${eventCode}`, {
           headers: {
-            "Accept": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
             "x-app-code": "WEB",
+            "x-bms-le-app-code": "WEB",
             "x-platform-code": "WEB",
-            "x-region-code": "BANG"
+            "x-platform": "WEB",
+            "x-region-code": regCode,
           },
           credentials: "include"
         });
-        return await response.json();
+        const text = await response.text();
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          return { error: `Invalid JSON: ${text.substring(0, 100)}` };
+        }
       } catch (e) {
         return { error: e.message };
       }
-    }, code, API);
+    }, code, API, regionCode);
     
     if (data.error) {
       console.error(`  Error checking ${code}:`, data.error);
