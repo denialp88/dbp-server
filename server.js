@@ -173,7 +173,7 @@ app.post('/test-notification', async (req, res) => {
   }
 });
 
-// Check single event using browser context
+// Check single event by navigating to the event page and scraping
 async function checkEvent(code) {
   if (!browserReady || !page) {
     console.log(`  ⚠️ Browser not ready, skipping ${code}`);
@@ -181,83 +181,55 @@ async function checkEvent(code) {
   }
   
   try {
-    // Get cookies from browser and extract region info
-    const cookies = await page.cookies();
-    const rgnCookie = cookies.find(c => c.name === 'rgn');
-    let regionCode = 'BANG';
-    let regionSlug = 'bengaluru';
+    // Navigate to the event page
+    const eventUrl = `https://in.bookmyshow.com/events/${code}`;
+    await page.goto(eventUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
     
-    if (rgnCookie) {
-      try {
-        const rgn = JSON.parse(decodeURIComponent(rgnCookie.value));
-        regionCode = rgn.regionCode || 'BANG';
-        regionSlug = rgn.regionSlug || 'bengaluru';
-      } catch (e) {}
-    }
-    
-    // Use page.evaluate to make API call with browser cookies
-    const data = await page.evaluate(async (eventCode, apiUrl, regCode) => {
-      try {
-        const response = await fetch(`${apiUrl}/api/le/events/info/${eventCode}`, {
-          headers: {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "x-app-code": "WEB",
-            "x-bms-le-app-code": "WEB",
-            "x-platform-code": "WEB",
-            "x-platform": "WEB",
-            "x-region-code": regCode,
-          },
-          credentials: "include"
-        });
-        const text = await response.text();
-        try {
-          return JSON.parse(text);
-        } catch (e) {
-          return { error: `Invalid JSON: ${text.substring(0, 100)}` };
-        }
-      } catch (e) {
-        return { error: e.message };
-      }
-    }, code, API, regionCode);
-    
-    if (data.error) {
-      console.error(`  Error checking ${code}:`, data.error);
-      return { code, seats: 0, tickets: [], error: data.error };
-    }
-    
-    if (!data.data) return { code, seats: 0, tickets: [] };
-    
-    let totalSeats = 0;
-    const tickets = [];
-    
-    if (data.data.eventCards) {
-      for (const [venue, dates] of Object.entries(data.data.eventCards)) {
-        for (const [date, times] of Object.entries(dates)) {
-          for (const [time, tix] of Object.entries(times)) {
-            for (const [key, t] of Object.entries(tix)) {
-              const seats = t.minAvailableSeats || 0;
-              totalSeats += seats;
-              if (seats > 0) {
-                tickets.push({
-                  name: t.eventName || key,
-                  venue: t.venueName || venue,
-                  date: t.eventDate || date,
-                  time: t.eventTime || time,
-                  seats: seats,
-                  price: t.minPrice || 0,
-                  url: `https://in.bookmyshow.com/events/${code}`
-                });
-              }
-            }
-          }
+    // Try to extract availability info from the page
+    const data = await page.evaluate(() => {
+      // Look for "Book" or "Buy Tickets" buttons - if present, tickets available
+      const bookButtons = document.querySelectorAll('button, a');
+      let hasBookButton = false;
+      for (const btn of bookButtons) {
+        const text = btn.textContent?.toLowerCase() || '';
+        if (text.includes('book') || text.includes('buy ticket') || text.includes('get ticket')) {
+          hasBookButton = true;
+          break;
         }
       }
-    }
+      
+      // Look for "Sold Out" or "No tickets" text
+      const pageText = document.body?.innerText?.toLowerCase() || '';
+      const isSoldOut = pageText.includes('sold out') || pageText.includes('no tickets') || pageText.includes('not available');
+      
+      // Look for price/availability info
+      const priceElements = document.querySelectorAll('[class*="price"], [class*="ticket"], [class*="availability"]');
+      let priceInfo = [];
+      priceElements.forEach(el => {
+        if (el.textContent) priceInfo.push(el.textContent.trim());
+      });
+      
+      return {
+        hasBookButton,
+        isSoldOut,
+        priceInfo: priceInfo.slice(0, 5),
+        title: document.title
+      };
+    });
     
-    return { code, seats: totalSeats, tickets };
+    // Determine if tickets are available
+    const hasTickets = data.hasBookButton && !data.isSoldOut;
+    const seats = hasTickets ? 1 : 0; // We can't get exact count from scraping, so use 1 as indicator
+    
+    return { 
+      code, 
+      seats, 
+      tickets: hasTickets ? [{ name: data.title, url: eventUrl }] : [],
+      scraped: true
+    };
   } catch (error) {
-    console.error(`Error checking ${code}:`, error.message);
+    console.error(`  Error checking ${code}:`, error.message);
     return { code, seats: 0, tickets: [], error: error.message };
   }
 }
